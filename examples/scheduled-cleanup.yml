@@ -1,0 +1,161 @@
+# Example: Scheduled cleanup with manual approval via GitHub Issues
+#
+# This workflow demonstrates a two-phase approach:
+# 1. Daily dry-run creates/updates a GitHub Issue with resources to delete
+# 2. Commenting "approve-nuke" on the issue triggers actual deletion
+
+name: AWS Nuke Cleanup
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "123456789012"
+
+jobs:
+  dry-run:
+    name: AWS Nuke Dry Run
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issue_comment'
+    outputs:
+      resources_found: ${{ steps.nuke.outputs.resources-found }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-nuke-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: webframp/action-aws-nuke@v1
+        id: nuke
+        with:
+          config-file: 'config/aws-nuke-config.yml'
+          dry-run: 'true'
+
+      - name: Create or update GitHub Issue
+        if: steps.nuke.outputs.resources-found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('${{ steps.nuke.outputs.output-file }}', 'utf8');
+            const resourceCount = '${{ steps.nuke.outputs.resources-count }}';
+
+            const issueTitle = `AWS Nuke Dry-Run - ${new Date().toISOString().split('T')[0]}`;
+            const issueBody = [
+              '## AWS Nuke Dry-Run Results',
+              '',
+              `**Resources Found:** ${resourceCount}`,
+              `**Workflow Run:** [#${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              '',
+              '```',
+              output.split('\n').filter(l => l.includes('would remove')).slice(0, 100).join('\n'),
+              '```',
+              '',
+              '**To approve deletion**, comment: `approve-nuke`'
+            ].join('\n');
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'aws-nuke-pending',
+              state: 'open'
+            });
+
+            if (issues.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: issueBody
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['aws-nuke-pending']
+              });
+            }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuke-dry-run-output
+          path: ${{ steps.nuke.outputs.output-file }}
+          retention-days: 30
+
+  nuke:
+    name: Execute AWS Nuke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, 'approve-nuke')
+
+    steps:
+      - name: Validate approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            if (!issue.data.labels.some(l => l.name === 'aws-nuke-pending')) {
+              core.setFailed('Issue does not have aws-nuke-pending label');
+              return;
+            }
+
+            const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.actor
+            });
+
+            if (!['admin', 'write'].includes(permission.data.permission)) {
+              core.setFailed(`User ${context.actor} does not have write permission`);
+            }
+
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-nuke-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: webframp/action-aws-nuke@v1
+        id: nuke
+        with:
+          config-file: 'config/aws-nuke-config.yml'
+          dry-run: 'false'
+
+      - name: Comment and close issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## AWS Nuke Completed\n\n**Deleted:** ${{ steps.nuke.outputs.resources-count }} resources\n**By:** @${context.actor}`
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed',
+              labels: ['aws-nuke-completed']
+            });

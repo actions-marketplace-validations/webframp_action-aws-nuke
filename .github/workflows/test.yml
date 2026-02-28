@@ -1,0 +1,40 @@
+name: Test Action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate action.yml
+        run: |
+          # Check action.yml is valid YAML
+          python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
+
+      - name: Check required files exist
+        run: |
+          test -f action.yml
+          test -f README.md
+          test -f LICENSE
+
+  test-download:
+    name: Test aws-nuke Download
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test binary download
+        run: |
+          VERSION="3.64.0"
+          curl -sSL -o aws-nuke.tar.gz \
+            "https://github.com/ekristen/aws-nuke/releases/download/v${VERSION}/aws-nuke-v${VERSION}-linux-amd64.tar.gz"
+          tar -xzf aws-nuke.tar.gz
+          chmod +x aws-nuke
+          ./aws-nuke version

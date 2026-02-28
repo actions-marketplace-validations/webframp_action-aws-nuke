@@ -1,0 +1,84 @@
+name: 'aws-nuke'
+description: 'Run aws-nuke to clean up AWS account resources'
+author: 'webframp'
+
+branding:
+  icon: 'trash-2'
+  color: 'orange'
+
+inputs:
+  config-file:
+    description: 'Path to aws-nuke config file'
+    required: true
+  dry-run:
+    description: 'Run in dry-run mode'
+    required: false
+    default: 'true'
+  version:
+    description: 'aws-nuke version'
+    required: false
+    default: '3.64.0'
+
+outputs:
+  resources-found:
+    description: 'Whether resources were found to delete (true/false)'
+    value: ${{ steps.nuke.outputs.resources_found }}
+  resources-count:
+    description: 'Number of resources found or deleted'
+    value: ${{ steps.nuke.outputs.resources_count }}
+  output-file:
+    description: 'Path to aws-nuke output log'
+    value: ${{ steps.nuke.outputs.output_file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download aws-nuke
+      shell: bash
+      run: |
+        curl -sSL -o aws-nuke.tar.gz \
+          "https://github.com/ekristen/aws-nuke/releases/download/v${{ inputs.version }}/aws-nuke-v${{ inputs.version }}-linux-amd64.tar.gz"
+        tar -xzf aws-nuke.tar.gz
+        chmod +x aws-nuke
+
+    - name: Run aws-nuke
+      id: nuke
+      shell: bash
+      run: |
+        set +e
+
+        OUTPUT_FILE="${RUNNER_TEMP}/aws-nuke-output.txt"
+
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          DRY_RUN_FLAG=""
+        else
+          DRY_RUN_FLAG="--no-dry-run"
+        fi
+
+        ./aws-nuke run \
+          --config "${{ inputs.config-file }}" \
+          --force \
+          $DRY_RUN_FLAG \
+          2>&1 | tee "$OUTPUT_FILE"
+
+        EXIT_CODE=$?
+
+        # Count resources (dry-run shows "would remove", actual shows "removed")
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          RESOURCE_COUNT=$(grep -c "would remove" "$OUTPUT_FILE" || echo "0")
+        else
+          RESOURCE_COUNT=$(grep -c "removed" "$OUTPUT_FILE" || echo "0")
+        fi
+
+        # Determine if resources were found
+        if [ "$RESOURCE_COUNT" -gt 0 ]; then
+          echo "resources_found=true" >> $GITHUB_OUTPUT
+        else
+          echo "resources_found=false" >> $GITHUB_OUTPUT
+        fi
+
+        echo "resources_count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
+        echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+
+        # Exit with original code for caller to handle
+        exit $EXIT_CODE
